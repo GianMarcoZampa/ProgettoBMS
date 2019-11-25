@@ -269,3 +269,301 @@ else
     error_high_BMS_temperature = NaN;
 end
 
+% CONTROLLA GLI ERRORI: se non ci sono allora esegui il test.
+if(isnan(error_high_cell_voltage) &&...
+		isnan(error_low_cell_voltage) &&...
+		isnan(error_high_cell_SoC) &&...
+		isnan(error_low_cell_SoC) &&...
+		isnan(error_high_cell_temperature) &&...
+		isnan(error_low_cell_temperature) &&...
+        isnan(error_high_BMS_temperature))
+    %% BILANCIAMENTO
+    
+    % Per avere delle misure di tensione più precise, spegni il
+    % bilanciamento prima di ogni lettura, cioè negli istanti X.0.
+    if counter == 0 || current_phase == 3
+        set_balancing = [0; 0; 0; 0; 0; 0];
+        filter_set_balancing = CellBalancingStatus(:, test_balance_window);
+    else
+        % Applica il bilanciamento verificando che le due condizioni siano
+        % soddisfatte:
+        % 1. tensione di una cella è vicina a quella più carica di un
+        % valore inferiore a DELTA_VOLTAGE_EOB
+        % 2. tensione di una cella supera la soglia di bilanciamento.
+        if (balancing == 1)
+            toWriteCellBalancingStatus = zeros(CELLS_NUMBER, 1);
+            for i=1:CELLS_NUMBER
+                switch bal_algorithm_selector
+					
+					case 'Ac'
+						
+						if set_SoC(i) < (SoCmax - DELTA_SoC)
+							% non bilanciare!
+							toWriteCellBalancingStatus(i, 1) = 0;
+						else
+							if set_SoC(i) >= CELL_SoC_START_BALANCING
+								% bilancia!
+								toWriteCellBalancingStatus(i, 1) = 1;
+							else
+								% non bilanciare!
+								toWriteCellBalancingStatus(i, 1) = 0;
+							end
+						end
+						
+					case 'Bc'
+						
+						if ((set_SoC(i) > CELL_SoC_START_BALANCING) &  ...
+								(SoCmax < CELL_SoC_START_SP_CH_REDUCTION) &  ...
+								(set_SoC(i) > SoCmin + (set_SoC(i)*((CELL_SoC_START_SP_CH_REDUCTION-SoCmin)*dSoC_dOCV)/(R_BAL*STD_DH_CURRENT))) & ...
+								(set_SoC(i) > SoCmin + DELTA_SoC))
+							
+							toWriteCellBalancingStatus(i, 1) = 1; % bilancia!
+						else
+							if ((set_SoC(i) > CELL_SoC_START_BALANCING) &  ...
+									(SoCmax >= CELL_SoC_START_SP_CH_REDUCTION) & ...
+									(set_SoC(i) > SoCmin + DELTA_SoC))
+								
+								toWriteCellBalancingStatus(i, 1) = 1; % bilancia!
+							else
+								toWriteCellBalancingStatus(i, 1) = 0;  % non bilanciare!
+							end
+						end
+						
+					case 'Av'
+						
+						if set_cells_voltages(i) < (Vmax - DELTA_VOLTAGE_EOB)
+							% non bilanciare!
+							toWriteCellBalancingStatus(i, 1) = 0;
+						else
+							if set_cells_voltages(i) >= CELL_VOLTAGE_START_BALANCING
+								% bilancia!
+								toWriteCellBalancingStatus(i, 1) = 1;
+							else
+								% non bilanciare!
+								toWriteCellBalancingStatus(i, 1) = 0;
+							end
+						end
+						
+					case 'Bv'
+						
+						if ((set_cells_voltages(i) > CELL_VOLTAGE_START_BALANCING) &&  ...
+								(Vmax < CELL_VOLTAGE_START_SP_CH_REDUCTION) &&  ...
+								(set_cells_voltages(i) > Vmin + (set_cells_voltages(i)*((CELL_VOLTAGE_START_SP_CH_REDUCTION-Vmin)*dSoC_dOCV)/(R_BAL*STD_DH_CURRENT))) && ...
+								(set_cells_voltages(i) > Vmin + DELTA_VOLTAGE_EOB))
+							
+							toWriteCellBalancingStatus(i, 1) = 1; % bilancia!
+						else
+							if ((set_cells_voltages(i) > CELL_VOLTAGE_START_BALANCING) &&  ...
+									(Vmax >= CELL_VOLTAGE_START_SP_CH_REDUCTION) && ...
+									(set_cells_voltages(i) > Vmin + DELTA_VOLTAGE_EOB))
+								
+								toWriteCellBalancingStatus(i, 1) = 1; % bilancia!
+							else
+								toWriteCellBalancingStatus(i, 1) = 0;  % non bilanciare!
+							end
+						end
+						
+				end
+					
+			end
+            
+            % Non bilanciare se è stato già fatto in tutte le celle nei
+            % "test_balance_window" secondi precedenti.
+            test_all_status = zeros(CELLS_NUMBER, 1);
+            test_all_status = logical(test_all_status); % converti da
+            % double a logico
+            if (clock/one_second_step > test_balance_window)
+                for k=0:(test_balance_window - 1)
+                    test_all_status = test_all_status | CellBalancingStatus(:, test_balance_window - k);
+                end
+            end
+            if (test_all_status == [1; 1; 1; 1; 1; 1])
+                toWriteCellBalancingStatus = [0; 0; 0; 0; 0; 0];
+            end
+        else
+            % Quando non bilancia, lo stato di bilanciamento da fornire
+            % alle celle è pari all'ultimo salvato.
+            toWriteCellBalancingStatus = CellBalancingStatus(:, test_balance_window);
+        end
+        % Salva lo stato di bilanciamento nella sua matrice di memoria
+        % shiftata verso sinistra.
+        CellBalancingStatus = circshift(CellBalancingStatus, [0 -1]);
+        CellBalancingStatus(:, test_balance_window) =  toWriteCellBalancingStatus;
+        % Manda lo stato di bilanciamento da applicare in uscita.
+        set_balancing = toWriteCellBalancingStatus;
+        filter_set_balancing = toWriteCellBalancingStatus;
+    end
+	
+    %% STIMA DELLA CORRENTE
+	
+	switch current_profile
+		
+		case 'charge'
+			
+			if  (current_phase ~= 3)
+				if (counter == 1)
+					
+					CellVoltage_filtered = filter(b, a, CellVoltageStatus, [], 2);
+					LowestCellVoltage = min(CellVoltage_filtered(:, filter_window_size));
+					
+					CellSoC_filtered = filter(b, a, CellSoCstatus, [], 2);
+					LowestCellSoC = min(CellSoC_filtered(:, filter_window_size));
+					
+					DeltaVoltage = (LowestCellVoltage - CELL_VOLTAGE_START_SP_CH_REDUCTION);
+					DeltaVoltageMax = (MAX_CELL_VOLTAGE - CELL_VOLTAGE_START_SP_CH_REDUCTION);
+					
+					DeltaSoC = (LowestCellSoC - CELL_SoC_START_SP_CH_REDUCTION);
+					DeltaSoCMax = (MAX_SoC - CELL_SoC_START_SP_CH_REDUCTION);
+					
+					switch cur_algorithm_selector
+						
+						case 'Ac'
+							
+							if (DeltaSoC > 0)
+								if (DeltaSoC <= DeltaSoCMax)
+									I_out = (1 - (DeltaSoC / DeltaSoCMax)) * STD_CH_CURRENT;
+									if I_out < (CUTOFF_CURRENT / 1000)
+										I_out = 0;
+									end
+								else
+									I_out = 0;
+								end
+							else
+								I_out = STD_CH_CURRENT;
+							end
+							
+						case'Bc'
+							
+							if (DeltaSoC > 0) || (current_phase ~= 0)
+								if (DeltaSoC <= DeltaSoCMax)
+									if (current_phase ~= 2)
+										I_out = min(STD_CH_CURRENT,(1 - ((DeltaSoC-Rint*ChSetPoint) / DeltaSoCMax)) * STD_CH_CURRENT);
+										current_phase = 1;
+									else
+										I_out = max( (1 - (DeltaSoC/DeltaSoCMax)) *(MAX_SoC/R_BAL), ChSetPoint *(1-1/tau));
+									end
+									if (LowestCellSoC >= CELL_SoC_STOP)
+										I_out = max( (1 - (DeltaSoC/DeltaSoCMax)) *(MAX_SoC/R_BAL), ChSetPoint *(1-1/tau));
+										current_phase = 2;
+									end
+								else
+									I_out = 0;
+								end
+							else
+								I_out = STD_CH_CURRENT;
+							end
+							
+						case 'Av'
+							
+							if (DeltaVoltage > 0)
+								if (DeltaVoltage <= DeltaVoltageMax)
+									I_out = (1 - (DeltaVoltage / DeltaVoltageMax)) * STD_CH_CURRENT;
+									if I_out < (CUTOFF_CURRENT / 1000)
+										I_out = 0;
+									end
+								else
+									I_out = 0;
+								end
+							else
+								I_out = STD_CH_CURRENT;
+							end
+							
+						case 'Bv'
+							
+							if (DeltaVoltage > 0) || (current_phase ~= 0)
+								if (DeltaVoltage <= DeltaVoltageMax)
+									if (current_phase ~= 2)
+										I_out = min(STD_CH_CURRENT,(1 - ((DeltaVoltage-Rint*ChSetPoint) / DeltaVoltageMax)) * STD_CH_CURRENT);
+										current_phase = 1;
+									else
+										I_out = max( (1 - (DeltaVoltage/DeltaVoltageMax)) *(MAX_CELL_VOLTAGE/R_BAL), ChSetPoint *(1-1/tau));
+									end
+									if (LowestCellVoltage >= CELL_VOLTAGE_STOP)
+										I_out = max( (1 - (DeltaVoltage/DeltaVoltageMax)) *(MAX_CELL_VOLTAGE/R_BAL), ChSetPoint *(1-1/tau));
+										current_phase = 2;
+									end
+								else
+									I_out = 0;
+								end
+							else
+								I_out = STD_CH_CURRENT;
+							end
+							
+					end
+					
+				else
+					I_out = ChSetPoint;
+				end
+				ChSetPoint = I_out;
+			else
+				transient_time = transient_time + 1;
+				I_out = 0;
+			end
+			
+		case 'discharge_9'
+			
+			I_out = -I0;
+			if (clock > 632*one_second_step && clock < 787*one_second_step) || (clock > 1649*one_second_step)
+				I_out = 0;
+			elseif (clock <= 632*one_second_step)
+				I_out = -I1;
+				
+			elseif (clock >= 787*one_second_step && clock <= 1649*one_second_step)
+				I_out = -I2;
+			end
+			
+		case 'full_discharge'
+			
+			I_out = STD_DH_CURRENT;
+			
+	end
+else
+    %% FUNZIONE DI SICUREZZA ATTIVA
+    
+    if counter == 1
+        % Applica i parametri di sicurezza: ferma tutto!
+        % Controlla solo se è presente un overvoltage.
+        if(~isnan(error_high_cell_voltage) &&...
+                isnan(error_low_cell_voltage)  &&...
+                isnan(error_high_cell_temperature) &&...
+                isnan(error_low_cell_temperature) &&...
+                isnan(error_high_BMS_temperature))
+            
+            % Azzera la corrente e bilancia solo le celle con overvoltage
+            I_out = 0;
+            ChSetPoint = I_out;
+            toWriteCellBalancingStatus = zeros(CELLS_NUMBER, 1);
+            for i=1:CELLS_NUMBER
+                if CellVoltageStatus(i, filter_window_size) >= MAX_SECURITY_CELL_VOLTAGE
+                    % bilancia!
+                    toWriteCellBalancingStatus(i, 1) = 1;
+                else
+                    % non bilanciare!
+                    toWriteCellBalancingStatus(i, 1) = 0;
+                end
+            end
+            % Manda lo stato di bilanciamento da applicare in uscita
+            % e salvalo nella sua matrice shiftata verso sinistra.
+            set_balancing = toWriteCellBalancingStatus;
+            filter_set_balancing = toWriteCellBalancingStatus;
+            CellBalancingStatus = circshift(CellBalancingStatus, [0 -1]);
+            CellBalancingStatus(:, test_balance_window) = toWriteCellBalancingStatus;
+        else
+            % Ferma il bilanciamento e la carica in tutti gli altri casi.
+            I_out = 0;
+            ChSetPoint = I_out;
+            set_balancing = [0; 0; 0; 0; 0; 0];
+            filter_set_balancing = [0; 0; 0; 0; 0; 0];
+            CellBalancingStatus = circshift(CellBalancingStatus, [0 -1]);
+            CellBalancingStatus(:, test_balance_window) = set_balancing;
+        end
+    else
+        % Quando non si esegue una nuova lettura, manda in uscita gli
+        % ultimi valori di corrente e stato di bilanciamento salvati.
+        I_out = ChSetPoint;
+        set_balancing = CellBalancingStatus(:, test_balance_window);
+        filter_set_balancing = CellBalancingStatus(:, test_balance_window);
+    end
+    
+    
+end
