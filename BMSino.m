@@ -1,4 +1,4 @@
-function [I_out, set_balancing, set_cells_voltages, filter_set_balancing, stop_simulation] = BMSino(read_step, one_second_step, cells_temperatures, BMS_temperature, cells_voltages)
+function [I_out, set_balancing, set_cells_voltages, set_SoC, filter_set_balancing, stop_simulation] = BMSino(read_step, one_second_step, cells_temperatures, BMS_temperature, cells_voltages, SoC_in)
 %% DEFINIZIONE VARIABILI
 
 % Seleziona l'algoritmo di bilanciamento con cui vuoi lavorare tra Av, Bv, Ac, e Bc.
@@ -84,6 +84,11 @@ end
 persistent CellVoltageStatus
 if isempty(CellVoltageStatus)
     CellVoltageStatus       = zeros(CELLS_NUMBER, filter_window_size);
+end
+
+persistent CellSoCstatus
+if isempty(CellSoCstatus)
+    CellSoCstatus=zeros(CELLS_NUMBER,test_balance_window);
 end
 
 persistent CellTemperatureStatus
